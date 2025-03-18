@@ -333,6 +333,8 @@ def dag_to_causal_expression(G, outcome):
         else:
             expr = f"P({outcome})"
     
+    expr = simplify_expression(expr)
+    
     return expr
 
 
@@ -354,4 +356,4 @@ def dag_to_causal_expression(G, outcome):
 
 expr = "P(Y | do(X), do(Z), W)"
 g = expr_to_digraph(expr)
-print(apply_rule_1(g, expr))
+print(simplify_expression(g, expr))
