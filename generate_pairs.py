@@ -3,7 +3,10 @@ import pandas as pd
 from transformers import AutoModelForCausalLM,  AutoTokenizer
 
 from huggingface_hub import login
-login('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')
+API_KEY = 'API_KEY'
+login(API_KEY)
+
+# use open AIs
 
 TEMPLATES = [
     "What is the average treatment effect of {Γ} on {Δ}?",
@@ -54,7 +57,7 @@ def generate_questions(num_questions: int, variables: list, templates: list, mat
         example = "What is the effect of changing the treatment smoking from 0 to 1 on the outcome lung cancer while holding age constant at some value 27?,E[smoking|do(lung cancer=1,age=27)] - E[smoking|do(lung cancer=0,age=27)]"
         prompt = f"Given the question: {question}\n Only provide the mathematical expression with no extra text. For example: {example}"
         inputs = tokenizer(prompt, return_tensors='pt')
-        model_output = model.generate(**inputs, max_length=200)
+        model_output = model.generate(**inputs, max_length=len(input)+10)
         response = tokenizer.decode(model_output[0], skip_special_tokens=True)
         print(response)
 
