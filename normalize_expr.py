@@ -4,38 +4,12 @@ import networkx as nx
 import sympy as sp
 from itertools import chain
 import logging
+import matplotlib.pyplot as plt
 
 
 logging.basicConfig()
 logger = logging.getLogger()
-logger.setLevel(logging.DEBUG)
-
-
-def replace_variables(expr: str):
-    """
-    Given some causal expression, replace the variables
-    with variables in greek letters.
-
-    *assumes that P and E are not variables
-    """
-    fvs = [
-    "α", "β", "γ", "δ", "ε", "ζ", "η", "θ", "ι", "κ", "λ", "μ",
-    "ν", "ξ", "ο", "π", "ρ", "σ", "τ", "υ", "φ", "χ", "ψ", "ω"]
-    
-    variables = set(re.findall(r"\b(?!P\()(?!(E\[))([a-zA-Z_]+)\b", expr))
-    
-    mapping = {var: greek for var, greek in zip(variables, itertools.cycle(fvs))}
-    for var, greek in mapping.items():
-        expr = re.sub(rf"\b{var}\b", greek, expr)
-    
-    return expr, mapping
-
-
-def to_standard_p(expr: str):
-    """
-    Converts the expression to standard probabilites using Do-Calculus Rules
-    """
-    pass
+logger.setLevel(logging.INFO)
 
 
 def expr_to_digraph(expr: str):
@@ -62,6 +36,7 @@ def expr_to_digraph(expr: str):
 
     interventions = [x.strip() for x in intervention.split(",")] if intervention else []
     confounders = [z.strip() for z in confounders.split(",")] if confounders else []
+    # logger.info(f"effect: {effect}, intervention: {intervention}, confounders {confounders} ")
 
     logger.debug(f'func: expr_to_digraph interventions: {interventions}')
     logger.debug(f'func: expr_to_digraph confounders{confounders}')
@@ -69,14 +44,9 @@ def expr_to_digraph(expr: str):
         x = x.replace('do(', '').replace(')', '')
         G.add_edge(x, effect)
 
-    # stuck here... we do not know the unique structure of this?
-    # Ill just have the nodes of like Z and W, and from a DAG, 
-    # if the nodes have no edges to or from it ill add it to just like P(Y| Z, W) when
-    # converting back to a causal expression
-
-    # so this node will always be d-separated from other nodes?
+    # might be problematic... 
     for z in confounders:
-        G.add_node(z)
+        G.add_edge(z, effect)
 
     return G
 
@@ -95,48 +65,49 @@ def apply_rule_1(G, expression):
         G: The DAG representing causal relationships.
         expression: The causal expression
     """
-    expression = expression.replace(" ", "")
-
-    parts = expression.split('|')  
-    outcome = parts[0].replace('P(', '').replace(')', '') 
-    
-    right_side = parts[1].replace(')', '')  
-    terms = right_side.split(',')  # :: List[Str]
-    logger.debug(terms)
-    logger.debug(G.nodes)
+    expression = expression.replace(" ", "") 
+    parts = expression.split('|')
+    outcome = parts[0].replace('P(', '').replace(')', '')
+    right_side = parts[1].replace(')', '')
+    terms = right_side.split(',')
     
     do_terms = []
     condition_terms = []
     
     for term in terms:
         if 'do(' in term:
-            do_terms.append(term.replace('do(', ''))
+            do_terms.append(term.replace('do(', '').replace(')', ''))
         else:
             condition_terms.append(term)
     
-    G_modified = G.copy()
-    for do_var in do_terms:
-        # remove all incoming edges into a do() term
-        for predecessor in list(G.predecessors(do_var)):
-            G_modified.remove_edge(predecessor, do_var)
+    if not do_terms:
+        return expression
     
-    # check each conditoning variable to see if it can be removed
-    removable_conditions = []
-    for z in condition_terms:
-        # check if outcome is independent of z 
-        other_conditions = [c for c in condition_terms if c != z]
-        
-
-        if nx.is_d_separator(G_modified, outcome, z, set(do_terms) | set(other_conditions)):
-            removable_conditions.append(z)
+    convertible_interventions = []
     
-    if removable_conditions:
-        new_conditions = [c for c in condition_terms if c not in removable_conditions]
+    for z_var in do_terms:
+        if len(do_terms) > 1 and z_var == do_terms[0]:
+            continue
+            
+        G_modified = G.copy()
+        for do_var in do_terms:
+            for predecessor in list(G.predecessors(do_var)):
+                G_modified.remove_edge(predecessor, do_var)
         
-        if do_terms and new_conditions:
-            new_expression = f"P({outcome}|{','.join(['do(' + x + ')' for x in do_terms])},{','.join(new_conditions)})"
-        elif do_terms:
-            new_expression = f"P({outcome}|{','.join(['do(' + x + ')' for x in do_terms])})"
+        other_interventions = [x for x in do_terms if x != z_var]
+        
+        # if Y and Z are d-seperated by X \cup W in G* where G* = G - {UX:U\in V(G)}
+        if nx.is_d_separator(G_modified, {outcome}, {z_var}, set(other_interventions) | set(condition_terms)):
+            convertible_interventions.append(z_var)
+    
+    if convertible_interventions:
+        new_do_terms = [x for x in do_terms if x not in convertible_interventions]
+        new_conditions = condition_terms + convertible_interventions
+        
+        if new_do_terms and new_conditions:
+            new_expression = f"P({outcome}|{','.join(['do(' + x + ')' for x in new_do_terms])},{','.join(new_conditions)})"
+        elif new_do_terms:
+            new_expression = f"P({outcome}|{','.join(['do(' + x + ')' for x in new_do_terms])})"
         elif new_conditions:
             new_expression = f"P({outcome}|{','.join(new_conditions)})"
         else:
@@ -169,39 +140,55 @@ def apply_rule_2(G, expression):
     
     for term in terms:
         if 'do(' in term:
-            do_terms.append(term.replace('do(', ''))
+            do_terms.append(term.replace('do(', '').replace(')', ''))
         else:
             condition_terms.append(term)
     
-    modified_terms = []
-    modified = False
+    if not do_terms:
+        return expression
     
-    for do_var in do_terms:
+    # here we try to convert each do(Z) to Z
+    convertible_interventions = []
+    
+    for z_var in do_terms:
+        if len(do_terms) > 1 and z_var == do_terms[0]:
+            continue
+            
+        # G-{UX:U\in V(G)}
         G_modified = G.copy()
+        for do_var in do_terms:
+            for predecessor in list(G.predecessors(do_var)):
+                G_modified.remove_edge(predecessor, do_var)
+
+        #  G-{UX:U\in V(G)} - {ZU:U\in V(G)}
+        for successor in list(G.successors(z_var)):
+            G_modified.remove_edge(z_var, successor)
         
-        for predecessor in list(G.predecessors(do_var)):
-            G_modified.remove_edge(predecessor, do_var)
+        # Other interventions (W)
+        other_interventions = [x for x in do_terms if x != z_var]
         
-        if nx.is_d_separator(G_modified, outcome, do_var, set(do_terms) - {do_var} | set(condition_terms)):
-            condition_terms.append(do_var)
-            modified = True
-        else:
-            modified_terms.append(f"do({do_var})")
+        # if Y and Z are d-seperated by X \cup W in G** Where G** = G-{UX:U\in V(G)} - {ZU:U\in V(G)}
+        if nx.is_d_separator(G_modified, {outcome}, {z_var}, set(other_interventions) | set(condition_terms)):
+            convertible_interventions.append(z_var)
     
-    if modified:
-        if modified_terms and condition_terms:
-            new_expression = f"P({outcome}|{','.join(modified_terms)},{','.join(condition_terms)})"
-        elif modified_terms:
-            new_expression = f"P({outcome}|{','.join(modified_terms)})"
-        elif condition_terms:
-            new_expression = f"P({outcome}|{','.join(condition_terms)})"
+    if convertible_interventions:
+        # Convert applicable do(Z) terms to observation Z
+        new_do_terms = [x for x in do_terms if x not in convertible_interventions]
+        new_conditions = condition_terms + convertible_interventions
+        
+        if new_do_terms and new_conditions:
+            new_expression = f"P({outcome}|{','.join(['do(' + x + ')' for x in new_do_terms])},{','.join(new_conditions)})"
+        elif new_do_terms:
+            new_expression = f"P({outcome}|{','.join(['do(' + x + ')' for x in new_do_terms])})"
+        elif new_conditions:
+            new_expression = f"P({outcome}|{','.join(new_conditions)})"
         else:
             new_expression = f"P({outcome})"
         
         return new_expression
     else:
         return expression
-    
+
 
 def apply_rule_3(G, expression):
     """
@@ -213,6 +200,7 @@ def apply_rule_3(G, expression):
     ancestors of W.
     """
     expression = expression.replace(" ", "")
+    
     parts = expression.split('|')
     outcome = parts[0].replace('P(', '').replace(')', '')
     
@@ -224,30 +212,42 @@ def apply_rule_3(G, expression):
     
     for term in terms:
         if 'do(' in term:
-            do_terms.append(term.replace('do(', ''))
+            do_terms.append(term.replace('do(', '').replace(')', ''))
         else:
             condition_terms.append(term)
     
+    if len(do_terms) < 2:
+        return expression
+    
     removable_interventions = []
-    for z_var in do_terms:
-        if len(do_terms) > 1 and z_var == do_terms[0]:
-            continue
-            
-        G_modified = G.copy()
+    
+    primary_intervention = do_terms[0]
+    secondary_interventions = do_terms[1:]
+    
+    for z_var in secondary_interventions:
+        G_star = G.copy()
         
-        # 1. Remove all arrows going out of X (all main interventions)
-        for x_var in do_terms:
-            if x_var != z_var:  # Don't modify Z, only X
-                for successor in list(G.successors(x_var)):
-                    G_modified.remove_edge(x_var, successor)
+        # Create G* = G-{UX:U\in V(G)}
+        for do_var in do_terms:
+            for predecessor in list(G.predecessors(do_var)):
+                G_modified.remove_edge(predecessor, do_var)
         
-        # 2. Remove all arrows going into Z
-        for predecessor in list(G.predecessors(z_var)):
-            G_modified.remove_edge(predecessor, z_var)
-            
-        other_do_vars = [x for x in do_terms if x != z_var]
+        ancestors_of_W = set()
+        for w in condition_terms:
+            if w in G_star.nodes:
+                ancestors = nx.ancestors(G_star, w)
+                ancestors_of_W.update(ancestors)
+                ancestors_of_W.add(w) 
+
+        # G** = G* - {UZ : U \in V(G*) \land UW \not in E(G*)}
+        G_modified = G_star.copy()
+        for predecessor in list(G_star.predecessors(z_var)):
+            if predecessor not in ancestors_of_W:
+                G_modified.remove_edge(predecessor, z_var)
         
-        if nx.is_d_separator(G_modified, outcome, z_var, set(other_do_vars) | set(condition_terms)):
+        conditioning_set = set([primary_intervention]) | set(condition_terms)
+        
+        if nx.is_d_separator(G_modified, {outcome}, {z_var}, conditioning_set):
             removable_interventions.append(z_var)
     
     if removable_interventions:
@@ -338,6 +338,19 @@ def dag_to_causal_expression(G, outcome):
     return expr
 
 
+def draw_dag(G):
+    plt.figure(figsize=(10, 7))
+    
+    pos = nx.spring_layout(G, seed=42)  
+    nx.draw_networkx_nodes(G, pos, node_size=700, node_color='lightblue')
+    nx.draw_networkx_edges(G, pos, arrowsize=20, width=2, edge_color='black')
+    nx.draw_networkx_labels(G, pos, font_size=12, font_weight='bold')
+    
+    plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+    return plt
+
 # expr = "P(Y | do(X, Z))"
 # g = expr_to_digraph(expr)
 # print(g.adj)
@@ -356,4 +369,4 @@ def dag_to_causal_expression(G, outcome):
 
 expr = "P(Y | do(X), do(Z), W)"
 g = expr_to_digraph(expr)
-print(simplify_expression(g, expr))
+print(f'ORIGINAL EXPR: {expr}, NORMALIZED EXPR: {apply_rule_2(g, expr)}')
